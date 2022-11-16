@@ -39,7 +39,7 @@
     "base-x": "^4.0.0",
     "commander": "^8.3.0",
     "cross-fetch": "^3.1.5",
-    "eosjs": "^22.1.0",
+    "vexaniumjs": "^22.1.0",
     "fast-json-stringify": "^2.7.9",
     "fastify": "^3.29.3",
     "fastify-elasticsearch": "^2.0.0",
