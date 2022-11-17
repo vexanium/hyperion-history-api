@@ -7,7 +7,7 @@ const commander_1 = require("commander");
 const path_1 = __importDefault(require("path"));
 const promises_1 = require("fs/promises");
 const fs_1 = require("fs");
-const eosjs_1 = require("eosjs");
+const vexaniumjs_1 = require("vexaniumjs");
 const cross_fetch_1 = __importDefault(require("cross-fetch"));
 const ws_1 = __importDefault(require("ws"));
 const program = new commander_1.Command();
@@ -135,7 +135,7 @@ async function newChain(shortName, options) {
             process.exit(1);
         }
         // test nodeos availability
-        const jsonRpc = new eosjs_1.JsonRpc(options.http, { fetch: cross_fetch_1.default });
+        const jsonRpc = new vexaniumjs_1.JsonRpc(options.http, { fetch: cross_fetch_1.default });
         const info = await jsonRpc.get_info();
         jsonData.api.chain_api = options.http;
         connections.chains[shortName].chain_id = info.chain_id;
