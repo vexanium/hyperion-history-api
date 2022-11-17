@@ -11,7 +11,7 @@ async function getTransaction(fastify: FastifyInstance, request: FastifyRequest)
     }
 
     const pResults = await Promise.all([
-        fastify.eosjs.rpc.get_info(),
+        fastify.vexaniumjs.rpc.get_info(),
         fastify.elastic.search({
             index: indexPattern,
             size: _size,

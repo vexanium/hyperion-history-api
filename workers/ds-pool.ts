@@ -382,7 +382,7 @@ export default class DSPoolWorker extends HyperionWorker {
                         this.txDec
                     ).data;
                 } catch (e) {
-                    debugLog(`(eosjs) ${action.account}::${action.name} @ ${block_num} >>> ${e.message}`);
+                    debugLog(`(vexaniumjs) ${action.account}::${action.name} @ ${block_num} >>> ${e.message}`);
                     return null;
                 }
             } else {
