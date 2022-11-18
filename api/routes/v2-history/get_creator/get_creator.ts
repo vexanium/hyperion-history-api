@@ -15,7 +15,7 @@ async function getCreator(fastify: FastifyInstance, request: FastifyRequest) {
 
     if (query.account === fastify.manager.config.settings.eosio_alias) {
         try {
-            const genesisBlock = await fastify.eosjs.rpc.get_block(1);
+            const genesisBlock = await fastify.vexaniumjs.rpc.get_block(1);
             if (genesisBlock) {
                 response.timestamp = genesisBlock.timestamp;
             }
@@ -50,7 +50,7 @@ async function getCreator(fastify: FastifyInstance, request: FastifyRequest) {
     } else {
         let accountInfo;
         try {
-            accountInfo = await fastify.eosjs.rpc.get_account(query.account);
+            accountInfo = await fastify.vexaniumjs.rpc.get_account(query.account);
         } catch (e) {
             throw new Error("account not found");
         }
@@ -71,7 +71,7 @@ async function getCreator(fastify: FastifyInstance, request: FastifyRequest) {
                 const hits = blockHeader['body']['hits']['hits'];
                 if (hits.length > 0 && hits[0]._source) {
                     const blockId = blockHeader['body']['hits']['hits'][0]._source.block_id;
-                    const blockData = await fastify.eosjs.rpc.get_block(blockId);
+                    const blockData = await fastify.vexaniumjs.rpc.get_block(blockId);
                     response.block_num = blockData.block_num;
                     for (const transaction of blockData["transactions"]) {
                         if (typeof transaction.trx !== 'string') {

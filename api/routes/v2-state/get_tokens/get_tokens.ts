@@ -52,7 +52,7 @@ async function getTokens(fastify: FastifyInstance, request: FastifyRequest) {
             precision = fastify.tokenCache.get(key).precision;
         } else {
             try {
-                token_data = await fastify.eosjs.rpc.get_currency_balance(data.code, query.account, data.symbol);
+                token_data = await fastify.vexaniumjs.rpc.get_currency_balance(data.code, query.account, data.symbol);
                 if (token_data.length > 0) {
                     const [amount, symbol] = token_data[0].split(" ");
                     const amount_arr = amount.split(".");

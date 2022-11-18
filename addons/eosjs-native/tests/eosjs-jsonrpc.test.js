@@ -268,7 +268,7 @@ describe('JSON RPC', function () {
                     expPath = '/v1/chain/get_currency_balance';
                     code = 'morse';
                     account = 'myaccountaaa';
-                    symbol = 'EOS';
+                    symbol = 'VEX';
                     expReturn = { data: '12345' };
                     expParams = {
                         body: JSON.stringify({
@@ -323,7 +323,7 @@ describe('JSON RPC', function () {
                 case 0:
                     expPath = '/v1/chain/get_currency_stats';
                     code = 'morse';
-                    symbol = 'EOS';
+                    symbol = 'VEX';
                     expReturn = { data: '12345' };
                     expParams = {
                         body: JSON.stringify({

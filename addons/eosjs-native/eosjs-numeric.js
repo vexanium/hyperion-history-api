@@ -355,7 +355,7 @@ function stringToPublicKey(s) {
     if (typeof s !== 'string') {
         throw new Error('expected string containing public key');
     }
-    if (s.substr(0, 3) === 'EOS') {
+    if (s.substr(0, 3) === 'VEX') {
         var whole = base58ToBinary(exports.publicKeyDataSize + 4, s.substr(3));
         var key = {type: KeyType.k1, data: new Uint8Array(exports.publicKeyDataSize)};
         for (var i = 0; i < exports.publicKeyDataSize; ++i) {
@@ -391,11 +391,11 @@ function publicKeyToString(key) {
 
 exports.publicKeyToString = publicKeyToString;
 
-/** If a key is in the legacy format (`EOS` prefix), then convert it to the new format (`PUB_K1_`).
+/** If a key is in the legacy format (`VEX` prefix), then convert it to the new format (`PUB_K1_`).
  * Leaves other formats untouched
  */
 function convertLegacyPublicKey(s) {
-    if (s.substr(0, 3) === 'EOS') {
+    if (s.substr(0, 3) === 'VEX') {
         return publicKeyToString(stringToPublicKey(s));
     }
     return s;
@@ -403,7 +403,7 @@ function convertLegacyPublicKey(s) {
 
 exports.convertLegacyPublicKey = convertLegacyPublicKey;
 
-/** If a key is in the legacy format (`EOS` prefix), then convert it to the new format (`PUB_K1_`).
+/** If a key is in the legacy format (`VEX` prefix), then convert it to the new format (`PUB_K1_`).
  * Leaves other formats untouched
  */
 function convertLegacyPublicKeys(keys) {

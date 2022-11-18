@@ -1,7 +1,7 @@
 import {HyperionWorker} from "./hyperionWorker";
 import {cargo, QueueObject} from "async";
 import {Serialize} from "../addons/eosjs-native";
-import {Type} from "eosjs/dist/eosjs-serialize";
+import {Type} from "vexaniumjs/dist/vexjs-serialize";
 import {debugLog, deserialize, hLog, serialize} from "../helpers/common_functions";
 import * as AbiEOS from "@eosrio/node-abieos";
 
@@ -407,7 +407,7 @@ export default class StateReader extends HyperionWorker {
                         if (!this.receivedFirstBlock) {
                             if (blk_num !== this.local_block_num + 1) {
                                 hLog(`WARNING: First block received was #${blk_num}, but #${this.local_block_num + 1} was expected!`);
-                                hLog(`Make sure the block.log file contains the requested range, check with "eosio-blocklog --smoke-test"`);
+                                hLog(`Make sure the block.log file contains the requested range, check with "vex-blocklog --smoke-test"`);
                                 this.local_block_num = blk_num - 1;
                             }
                             this.receivedFirstBlock = true;
