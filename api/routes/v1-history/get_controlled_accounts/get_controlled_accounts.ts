@@ -45,10 +45,10 @@ async function getControlledAccounts(fastify: FastifyInstance, request: FastifyR
 	if (hits.length > 0) {
 		response.controlled_accounts = hits.map((v) => {
 			if (v._source.act.name === 'newaccount') {
-				if (v._source['@newaccount'].newact) {
-					return v._source['@newaccount'].newact;
-				} else if (v._source.act.data.newact) {
-					return v._source.act.data.newact;
+				if (v._source['@newaccount']) {
+					return v._source['@newaccount'];
+				} else if (v._source.act.data.name) {
+					return v._source.act.data.name;
 				} else {
 					return null;
 				}
