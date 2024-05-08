@@ -1,11 +1,11 @@
 import {FastifyInstance, FastifyReply, FastifyRequest} from "fastify";
 import {mergeActionMeta, timedQuery} from "../../../helpers/functions";
-import {Serialize} from "eosjs";
+import {Serialize} from "vexaniumjs";
 import {hLog} from "../../../../helpers/common_functions";
 import * as AbiEOS from "@eosrio/node-abieos";
 import {ApiResponse} from "@elastic/elasticsearch";
 import {TextDecoder, TextEncoder} from "util";
-import {JsonRpc} from "eosjs/dist";
+import {JsonRpc} from "vexaniumjs/dist";
 import {terms} from "../../v2-history/get_actions/definitions";
 
 const abi_remapping = {
@@ -272,8 +272,8 @@ async function getActions(fastify: FastifyInstance, request: FastifyRequest) {
             }
         }
     };
+    const pResults = await Promise.all([fastify.vexaniumjs.rpc.get_info(), fastify.elastic['search'](esOpts)]);
     // console.log(JSON.stringify(esOpts, null, 2));
-    const pResults = await Promise.all([fastify.eosjs.rpc.get_info(), fastify.elastic['search'](esOpts)]);
     const results = pResults[1];
     const response = {
         actions: [],
@@ -324,7 +324,7 @@ async function getActions(fastify: FastifyInstance, request: FastifyRequest) {
                 try {
                     const [contract, _] = await getContractAtBlock(
                         fastify.elastic,
-                        fastify.eosjs.rpc,
+                        fastify.vexaniumjs.rpc,
                         fastify.manager.chain,
                         action.act.account,
                         action.block_num

@@ -61,7 +61,7 @@ var transaction = {
             data: {
                 from: 'thegazelle',
                 to: 'remasteryoda',
-                quantity: '1.0000 EOS',
+                quantity: '1.0000 VEX',
                 memo: 'For a secure future.',
             },
             hex_data: "00808a517dc354cb6012f557656ca4ba102700000000000004454f530000000014466f722\n        06120736563757265206675747572652e",
@@ -78,7 +78,7 @@ var transaction = {
             data: {
                 from: 'thegazelle',
                 to: 'remasteryoda',
-                quantity: '2.0000 EOS',
+                quantity: '2.0000 VEX',
                 memo: 'For a second secure future (multiverse?)',
             },
             hex_data: "00808a517dc354cb6012f557656ca4ba204e00000000000004454f530000000028466f722061207365636f6e642073656\n        37572652066757475726520286d756c746976657273653f29",
@@ -138,7 +138,7 @@ var deserializedActions = [
         data: {
             from: 'thegazelle',
             memo: 'For a secure future.',
-            quantity: '1.0000 EOS',
+            quantity: '1.0000 VEX',
             to: 'remasteryoda',
         },
         name: 'transfer',
@@ -149,7 +149,7 @@ var deserializedActions = [
         data: {
             from: 'thegazelle',
             memo: 'For a second secure future (multiverse?)',
-            quantity: '2.0000 EOS',
+            quantity: '2.0000 VEX',
             to: 'remasteryoda',
         },
         name: 'transfer',

@@ -19,7 +19,7 @@ async function getAccount(fastify: FastifyInstance, request: FastifyRequest) {
     const reqQueue = [];
 
     try {
-        response.account = await fastify.eosjs.rpc.get_account(account);
+        response.account = await fastify.vexaniumjs.rpc.get_account(account);
     } catch (e) {
         throw new Error("Account not found!");
     }

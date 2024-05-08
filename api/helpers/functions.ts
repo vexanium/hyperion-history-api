@@ -323,7 +323,7 @@ export async function addBlockRangeOpts(data, search_body, fastify: FastifyInsta
         }
         if (data['start_from'] < 0) {
             if (!head) {
-                head = (await fastify.eosjs.rpc.get_info()).head_block_num;
+                head = (await fastify.vexaniumjs.rpc.get_info()).head_block_num;
             }
             blockRange["block_num"]['gte'] = head + data['start_from'];
         } else {
@@ -337,7 +337,7 @@ export async function addBlockRangeOpts(data, search_body, fastify: FastifyInsta
         }
         if (data['read_until'] < 0) {
             if (!head) {
-                head = (await fastify.eosjs.rpc.get_info()).head_block_num;
+                head = (await fastify.vexaniumjs.rpc.get_info()).head_block_num;
             }
             blockRange["block_num"]['lte'] = head + data['read_until'];
         } else {
@@ -658,7 +658,7 @@ export async function handleChainApiRedirect(
                 // if (request.req.url === '/v1/chain/push_transaction') {
                 //     const packedTrx = JSON.parse(opts['body']).packed_trx;
                 //     const trxBuffer = Buffer.from(packedTrx, 'hex');
-                //     const trxData = await fastify.eosjs.api.deserializeTransactionWithActions(trxBuffer);
+                //     const trxData = await fastify.vexaniumjs.api.deserializeTransactionWithActions(trxBuffer);
                 //     console.log(trxData);
                 // }
             } catch (e) {

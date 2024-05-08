@@ -50,13 +50,13 @@ lastblock_indexed = r'.*Last Indexed Block:.* (\d*)'  #group the last block inde
 
 # Config
 hyperionfolder="/home/charles/hyperion/"
-indexer_log_file = "/home/charles/.pm2/logs/wax-indexer-out.log"
+indexer_log_file = "/home/charles/.pm2/logs/vex-indexer-out.log"
 ecosystem_file_location = f'{hyperionfolder}ecosystem.config.js'
 
-chain = "wax"  #set the Chain name eos or wax
-filepath=hyperionfolder+"chains/wax.config.json"
-indexer_stop = ["pm2", "trigger", "wax-indexer", "stop"]
-indexer_start = [f"{hyperionfolder}./run.sh", f'{ecosystem_file_location}', "wax-indexer"]
+chain = "vex"  #set the Chain name eos or vex
+filepath=hyperionfolder+"chains/vex.config.json"
+indexer_stop = ["pm2", "trigger", "vex-indexer", "stop"]
+indexer_start = [f"{hyperionfolder}./run.sh", f'{ecosystem_file_location}', "vex-indexer"]
 #indexer_start = ['/usr/bin/pm2', 'start', {ecosystem_file_location}, '--only', 'wax-indexer', '--update-env', '--silent']
 tail_indexer_logs = ["tail","-f", indexer_log_file]
 hyperion_version = '3.7'  #'3.1' or '3.3'

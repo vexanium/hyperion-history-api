@@ -74,7 +74,7 @@ async function getActions(fastify: FastifyInstance, request: FastifyRequest) {
     }
 
     if (query.checkLib) {
-        response.lib = (await fastify.eosjs.rpc.get_info()).last_irreversible_block_num;
+        response.lib = (await fastify.vexaniumjs.rpc.get_info()).last_irreversible_block_num;
     }
 
     if (query.simple) {

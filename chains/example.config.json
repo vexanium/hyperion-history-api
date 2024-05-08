@@ -64,8 +64,8 @@
   },
   "settings": {
     "preview": false,
-    "chain": "eos",
-    "eosio_alias": "eosio",
+    "chain": "vex",
+    "eosio_alias": "vexcore",
     "parser": "3.2",
     "auto_stop": 0,
     "index_version": "v1",

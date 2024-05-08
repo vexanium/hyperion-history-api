@@ -1,6 +1,6 @@
 {
-  "initial_timestamp": "2018-03-02T12:00:00.000",
-  "initial_key": "EOS6MRyAjQq8ud7hVNYcfnVPJqcVpscN5So8BhtHuGYqET5GDW5CV",
+  "initial_timestamp": "2019-06-26T09:00:00.000",
+  "initial_key": "VEX6LjFWJ6tfka3JAmsBttx1JdGznvkJ54h1oMWzAZEKnMUBWwv5Y",
   "initial_configuration": {
     "max_block_net_usage": 1048576,
     "target_block_net_usage_pct": 1000,
@@ -20,5 +20,5 @@
     "max_inline_action_depth": 4,
     "max_authority_depth": 6
   },
-  "initial_chain_id": "cf057bbfb72640471fd910bcb67639c22df9f92470936cddc1ade0e2f2e7dc4f"
+  "initial_chain_id": "0000000000000000000000000000000000000000000000000000000000000000"
 }

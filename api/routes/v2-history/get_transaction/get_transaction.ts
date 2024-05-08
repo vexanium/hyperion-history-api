@@ -1,6 +1,6 @@
 import {FastifyInstance, FastifyReply, FastifyRequest} from "fastify";
 import {mergeActionMeta, timedQuery} from "../../../helpers/functions";
-import {GetInfoResult} from "eosjs/dist/eosjs-rpc-interfaces";
+import {GetInfoResult} from "vexaniumjs/dist/vexjs-rpc-interfaces";
 
 async function getTransaction(fastify: FastifyInstance, request: FastifyRequest) {
 	const redis = fastify.redis;
@@ -30,7 +30,7 @@ async function getTransaction(fastify: FastifyInstance, request: FastifyRequest)
 				response.cached_lib = true;
 				resolve(JSON.parse(value));
 			} else {
-				fastify.eosjs.rpc.get_info().then(value1 => {
+				fastify.vexaniumjs.rpc.get_info().then(value1 => {
 					fastify.redis.set(key, JSON.stringify(value1), 'EX', 6);
 					response.cached_lib = false;
 					resolve(value1);

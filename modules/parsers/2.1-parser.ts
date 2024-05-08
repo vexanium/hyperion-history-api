@@ -73,7 +73,7 @@ export default class HyperionParser extends BaseParser {
             // profile deserialization
             const ds_times = {
                 size: message.content.length,
-                eosjs: {
+                vexaniumjs: {
                     result: undefined,
                     signed_block: undefined,
                     transaction_trace: undefined,
@@ -95,8 +95,8 @@ export default class HyperionParser extends BaseParser {
             //     ds_msg = worker.deserializeNative('result', message.content);
             // });
 
-            // deserialize result using eosjs (faster)
-            ds_times.eosjs.result = timedFunction(dsProfiling, () => {
+            // deserialize result using vexaniumjs (faster)
+            ds_times.vexaniumjs.result = timedFunction(dsProfiling, () => {
                 ds_msg = deserialize('result', message.content, this.txEnc, this.txDec, worker.types);
             });
 
@@ -126,12 +126,12 @@ export default class HyperionParser extends BaseParser {
                     }
                     if (!block) {
                         try {
-                            // deserialize signed_block using eosjs
-                            ds_times.eosjs.signed_block = timedFunction(dsProfiling, () => {
+                            // deserialize signed_block using vexaniumjs
+                            ds_times.vexaniumjs.signed_block = timedFunction(dsProfiling, () => {
                                 block = deserialize('signed_block_variant', res.block, this.txEnc, this.txDec, worker.types);
                             });
                         } catch (e) {
-                            hLog('signed_block_variant deserialization failed with eosjs!');
+                            hLog('signed_block_variant deserialization failed with vexaniumjs!');
                         }
                     }
                 }
@@ -191,14 +191,14 @@ export default class HyperionParser extends BaseParser {
                     hLog('transaction_trace[] deserialization failed with abieos!');
                 }
 
-                // deserialize transaction_trace using eosjs
+                // deserialize transaction_trace using vexaniumjs
                 if (!traces) {
                     try {
-                        ds_times.eosjs.transaction_trace = timedFunction(dsProfiling, () => {
+                        ds_times.vexaniumjs.transaction_trace = timedFunction(dsProfiling, () => {
                             traces = deserialize('transaction_trace[]', res.traces, this.txEnc, this.txDec, worker.types);
                         });
                     } catch (e) {
-                        hLog('transaction_trace[] deserialization failed with eosjs!');
+                        hLog('transaction_trace[] deserialization failed with vexaniumjs!');
                     }
                 }
 
@@ -221,14 +221,14 @@ export default class HyperionParser extends BaseParser {
                     hLog('table_delta[] deserialization failed with abieos!');
                 }
 
-                // deserialize table_delta using eosjs
+                // deserialize table_delta using vexaniumjs
                 if (!deltas) {
                     try {
-                        ds_times.eosjs.table_delta = timedFunction(dsProfiling, () => {
+                        ds_times.vexaniumjs.table_delta = timedFunction(dsProfiling, () => {
                             deltas = deserialize('table_delta[]', res.deltas, this.txEnc, this.txDec, worker.types);
                         });
                     } catch (e) {
-                        hLog('table_delta[] deserialization failed with eosjs!');
+                        hLog('table_delta[] deserialization failed with vexaniumjs!');
                     }
                 }
 
@@ -240,7 +240,7 @@ export default class HyperionParser extends BaseParser {
             if (worker.conf.settings.ds_profiling) {
                 hLog(ds_times);
                 const line = [ds_times.size];
-                line.push(...[ds_times.eosjs.result, ds_times.eosjs.signed_block, ds_times.eosjs.transaction_trace, ds_times.eosjs.table_delta]);
+                line.push(...[ds_times.vexaniumjs.result, ds_times.vexaniumjs.signed_block, ds_times.vexaniumjs.transaction_trace, ds_times.vexaniumjs.table_delta]);
                 line.push(...[ds_times.abieos.result, ds_times.abieos.signed_block, ds_times.abieos.transaction_trace, ds_times.abieos.table_delta]);
                 appendFileSync('ds_profiling.csv', line.join(',') + "\n");
             }

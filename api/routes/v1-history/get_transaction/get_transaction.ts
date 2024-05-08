@@ -1,6 +1,8 @@
 import {FastifyInstance, FastifyReply, FastifyRequest} from "fastify";
 import {mergeActionMeta, timedQuery} from "../../../helpers/functions";
-import {GetInfoResult} from "eosjs/dist/eosjs-rpc-interfaces";
+import {createHash} from "crypto";
+import flatstr from 'flatstr';
+import {GetInfoResult} from "vexaniumjs/dist/vexjs-rpc-interfaces";
 
 async function getTransaction(fastify: FastifyInstance, request: FastifyRequest) {
 
@@ -15,6 +17,24 @@ async function getTransaction(fastify: FastifyInstance, request: FastifyRequest)
     const redis = fastify.redis;
     const trxId = body.id.toLowerCase();
 
+	// build get_info request with caching
+	const $getInfo = new Promise<GetInfoResult>(resolve => {
+		const key = `${fastify.manager.chain}_get_info`;
+		fastify.redis.get(key).then(value => {
+			if (value) {
+				resolve(JSON.parse(value));
+			} else {
+				fastify.vexaniumjs.rpc.get_info().then(value1 => {
+					fastify.redis.set(key, JSON.stringify(value1), 'EX', 6);
+					resolve(value1);
+				}).catch((reason) => {
+					console.log(reason);
+					response.error = 'failed to get last_irreversible_block_num'
+					resolve(null);
+				});
+			}
+		});
+	});
     const conf = fastify.manager.config;
     const cachedData = await redis.hgetall('trx_' + trxId);
 
