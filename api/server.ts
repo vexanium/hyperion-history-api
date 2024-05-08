@@ -1,9 +1,9 @@
-import {hLog} from "../helpers/common_functions";
+import {hLog, waitUntilReady} from "../helpers/common_functions";
 import {ConfigurationModule} from "../modules/config";
 import {ConnectionManager} from "../connections/manager.class";
 import {HyperionConfig} from "../interfaces/hyperionConfig";
 import IORedis from 'ioredis';
-import fastify from 'fastify'
+import fastify, {FastifyReply, FastifyRequest} from 'fastify'
 import {registerPlugins} from "./plugins";
 import {AddressInfo} from "net";
 import {registerRoutes} from "./routes";
@@ -16,17 +16,17 @@ import {io, Socket} from "socket.io-client";
 import {CacheManager} from "./helpers/cacheManager";
 
 import {bootstrap} from 'global-agent';
-bootstrap();
 
 class HyperionApiServer {
 
     private hub: Socket;
     private readonly fastify;
+    private readonly pluginParams: any;
     private readonly chain: string;
     private readonly conf: HyperionConfig;
     private readonly manager: ConnectionManager;
-    private readonly cacheManager: CacheManager;
 
+    private readonly cacheManager: CacheManager;
     socketManager: SocketManager;
     mLoader: HyperionModuleLoader;
 
@@ -37,6 +37,11 @@ class HyperionApiServer {
 
         const cm = new ConfigurationModule();
         this.conf = cm.config;
+
+        if (this.conf.settings.use_global_agent) {
+            bootstrap();
+        }
+
         this.chain = this.conf.settings.chain;
         process.title = `hyp-${this.chain}-api`;
         this.manager = new ConnectionManager(cm);
@@ -56,12 +61,12 @@ class HyperionApiServer {
             level: 'info',
             prettyPrint: true,
             serializers: {
-                res: (reply) => {
+                res: (reply: { statusCode: any; }) => {
                     return {
                         statusCode: reply.statusCode
                     };
                 },
-                req: (request) => {
+                req: (request: any) => {
                     return {
                         method: request.method,
                         url: request.url,
@@ -111,6 +116,7 @@ class HyperionApiServer {
             },
             fastify_redis: this.manager.conn.redis,
             fastify_eosjs: this.manager,
+            chain_id: '',
         } as any;
 
         if (!this.conf.api.disable_rate_limit) {
@@ -140,26 +146,25 @@ class HyperionApiServer {
             pluginParams.fastify_swagger = docsConfig;
         }
 
-        registerPlugins(this.fastify, pluginParams);
-
-        this.addGenericTypeParsing();
+        this.pluginParams = pluginParams;
     }
 
     activateStreaming() {
-        console.log('Importing stream module');
+        console.log('Importing stream module...');
         import('./socketManager').then((mod) => {
             const connOpts = this.manager.conn.chains[this.chain];
-
             let _port = 57200;
             if (connOpts.WS_ROUTER_PORT) {
                 _port = connOpts.WS_ROUTER_PORT;
             }
-
             let _host = "127.0.0.1";
             if (connOpts.WS_ROUTER_HOST) {
                 _host = connOpts.WS_ROUTER_HOST;
             }
-
+            if (_host === "0.0.0.0") {
+                hLog(`[ERROR] WS Router Host is set to 0.0.0.0, please use a fixed IP address instead. Can't start streaming.`);
+                return;
+            }
             this.socketManager = new mod.SocketManager(
                 this.fastify,
                 `http://${_host}:${_port}`,
@@ -178,7 +183,7 @@ class HyperionApiServer {
             payload.on('end', () => {
                 done(null, data);
             });
-            payload.on('error', (err) => {
+            payload.on('error', (err: any) => {
                 console.log('---- Content Parsing Error -----');
                 console.log(err);
             });
@@ -186,6 +191,47 @@ class HyperionApiServer {
     }
 
     async init() {
+
+        const rpc = this.manager.nodeosJsonRPC;
+        await waitUntilReady(async () => {
+            try {
+                const chain_data = await rpc.get_info();
+                if (chain_data && chain_data.chain_id) {
+                    this.pluginParams.chain_id = chain_data.chain_id;
+                    return true;
+                } else {
+                    return false;
+                }
+            } catch (e) {
+                hLog(e.message);
+                return false;
+            }
+        }, 20, 5000, () => {
+            hLog('Failed to validate chain api!');
+            process.exit(1);
+        });
+        hLog('Chain API validated!');
+
+        // Wait for Elasticsearch availability
+        await waitUntilReady(async () => {
+            try {
+                const esInfo = await this.manager.elasticsearchClient.info();
+                hLog(`Elasticsearch: ${esInfo.body.version.number} | Lucene: ${esInfo.body.version.lucene_version}`);
+                return true;
+            } catch (e) {
+                console.log(e.message);
+                return false;
+            }
+        }, 10, 5000, () => {
+            hLog('Failed to check elasticsearch version!');
+            process.exit();
+        });
+
+        hLog('Elasticsearch validated!');
+        hLog('Registering plugins...');
+
+        registerPlugins(this.fastify, this.pluginParams);
+        this.addGenericTypeParsing();
 
         await this.mLoader.init();
 
@@ -198,12 +244,14 @@ class HyperionApiServer {
             }
         }
 
+        this.registerHomeRoute();
+
         registerRoutes(this.fastify);
 
         // register documentation when ready
         this.fastify.ready().then(async () => {
             await this.fastify.swagger();
-        }, (err) => {
+        }, (err: any) => {
             hLog('an error happened', err)
         });
 
@@ -212,12 +260,25 @@ class HyperionApiServer {
                 host: this.conf.api.server_addr,
                 port: this.conf.api.server_port
             });
-            hLog(`${this.chain} hyperion api ready and listening on port ${(this.fastify.server.address() as AddressInfo).port}`);
+            const listeningAddress = this.fastify.server.address() as AddressInfo;
+            hLog(`${this.chain} Hyperion API ready and listening on http://${listeningAddress.address}:${listeningAddress.port}`);
+            hLog(`API Should be externally accessible at: http://${this.conf.api.server_name}`);
             this.startHyperionHub();
         } catch (err) {
             hLog(err);
             process.exit(1)
         }
+    }
+
+    registerHomeRoute() {
+        this.fastify.get('/', async (request: FastifyRequest, reply: FastifyReply) => {
+            reply.send({
+                version: this.manager.current_version,
+                version_hash: this.manager.getServerHash(),
+                chain: this.chain,
+                chain_id: this.manager.conn.chains[this.chain].chain_id
+            });
+        });
     }
 
     startHyperionHub() {

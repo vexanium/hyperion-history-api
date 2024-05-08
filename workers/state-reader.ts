@@ -3,7 +3,7 @@ import {cargo, QueueObject} from "async";
 import {Serialize} from "../addons/eosjs-native";
 import {Type} from "vexaniumjs/dist/vexjs-serialize";
 import {debugLog, deserialize, hLog, serialize} from "../helpers/common_functions";
-import * as AbiEOS from "@eosrio/node-abieos";
+import {parseInt} from "lodash";
 
 export default class StateReader extends HyperionWorker {
 
@@ -22,7 +22,10 @@ export default class StateReader extends HyperionWorker {
     private completionMonitoring: NodeJS.Timeout;
     private types: Map<string, Type>;
     private local_block_num = parseInt(process.env.first_block, 10) - 1;
-    private queueSizeCheckInterval = 5000;
+    private local_block_id = '';
+
+    // private queueSizeCheckInterval = 5000;
+
     private local_distributed_count = 0;
     private lastPendingCount = 0;
     private local_last_block = 0;
@@ -40,6 +43,9 @@ export default class StateReader extends HyperionWorker {
     private shipInitStatus: any;
 
     private forkedBlocks = new Map<string, number>();
+    private idle = true;
+    private repairMode = false;
+    private internalPendingRanges = [];
 
     constructor() {
         super();
@@ -122,7 +128,7 @@ export default class StateReader extends HyperionWorker {
                             console.log('Message nacked!');
                             console.log(err.message);
                         } else {
-                            process.send({event: 'read_block', live: this.isLiveReader});
+                            process.send({event: 'read_block', live: this.isLiveReader, block_num: d.num});
                         }
                     });
 
@@ -165,13 +171,18 @@ export default class StateReader extends HyperionWorker {
     assertQueues(): void {
         if (this.isLiveReader) {
             const live_queue = this.chain + ':live_blocks';
-            this.ch.assertQueue(live_queue, {durable: true});
+            this.ch.assertQueue(live_queue, {durable: false, arguments: {"x-queue-version": 2}});
             this.ch.on('drain', () => {
                 this.qStatusMap[live_queue] = true;
             });
         } else {
             for (let i = 0; i < this.conf.scaling.ds_queues; i++) {
-                this.ch.assertQueue(this.chain + ":blocks:" + (i + 1), {durable: true});
+                this.ch.assertQueue(this.chain + ":blocks:" + (i + 1), {
+                    durable: false,
+                    arguments: {
+                        "x-queue-version": 2
+                    }
+                });
                 this.ch.on('drain', () => {
                     this.qStatusMap[this.chain + ":blocks:" + (i + 1)] = true;
                 });
@@ -189,17 +200,56 @@ export default class StateReader extends HyperionWorker {
 
     newRange(data: any) {
         debugLog(`new_range [${data.first_block},${data.last_block}]`);
+
+        if (this.repairMode) {
+            hLog(`Received Repair request [${data.first_block},${data.last_block}]`);
+        }
+
         this.local_distributed_count = 0;
         clearInterval(this.completionMonitoring);
         this.completionMonitoring = null;
         this.completionSignaled = false;
         this.local_last_block = data.last_block;
+
+        // make sure no data is requested from before the first indexed block on ship
+        if (parseInt(data.first_block) < this.shipInitStatus['trace_begin_block']) {
+            data.first_block = this.shipInitStatus['trace_begin_block'];
+            hLog("Impossible to repair requested range, first block is before the first indexed block on ship, trimming to " + data.first_block);
+        }
+
         this.range_size = parseInt(data.last_block) - parseInt(data.first_block);
-        if (this.allowRequests) {
-            this.requestBlockRange(data.first_block, data.last_block);
-            this.pendingRequest = null;
+
+        // if range size is not positive we need to immediately signal completion to master
+        if (this.range_size <= 0) {
+            this.emitCompletedSignal();
+        }
+
+        // make sure the range doesn't exceed the batch size
+        if (this.range_size > this.conf.scaling.batch_size) {
+            // split the range into multiple ranges
+            const ranges = [];
+            let start = parseInt(data.first_block);
+            let end = parseInt(data.last_block);
+            while (start < end) {
+                const s = start;
+                const e = start + this.conf.scaling.batch_size;
+                ranges.push({
+                    first_block: s,
+                    last_block: e > end ? end : e
+                });
+                start = e + 1;
+            }
+            console.log(`Splitting range [${data.first_block},${data.last_block}] into ${ranges.length} ranges`);
+            this.internalPendingRanges = ranges;
+            const next = this.internalPendingRanges.shift();
+            this.newRange(next);
         } else {
-            this.pendingRequest = [data.first_block, data.last_block];
+            if (this.allowRequests) {
+                this.requestBlockRange(data.first_block, data.last_block);
+                this.pendingRequest = null;
+            } else {
+                this.pendingRequest = [data.first_block, data.last_block];
+            }
         }
     }
 
@@ -231,7 +281,7 @@ export default class StateReader extends HyperionWorker {
             case 'stop': {
                 if (this.isLiveReader) {
                     console.log('[LIVE READER] Closing Websocket');
-                    this.ship.close();
+                    this.ship.close(true);
                     setTimeout(() => {
                         console.log('[LIVE READER] Process killed');
                         process.exit(1);
@@ -262,19 +312,25 @@ export default class StateReader extends HyperionWorker {
                             pending++;
                         }
                     });
-                    if (pending === this.lastPendingCount && pending > 0) {
-                        // console.log(`[${process.env['worker_id']}] Pending blocks: ${pending}`);
-                    } else {
+                    if (!(pending === this.lastPendingCount && pending > 0)) {
                         this.lastPendingCount = pending;
                     }
                 }
                 if (pending === 0) {
                     debugLog(`Reader completed - ${this.range_size} - ${this.local_distributed_count}`);
                     clearInterval(this.completionMonitoring);
-                    process.send({
-                        event: 'completed',
-                        id: process.env['worker_id']
-                    });
+
+                    // check if there are any pending ranges, then signal completion to master
+                    if (this.internalPendingRanges.length === 0) {
+                        process.send({
+                            event: 'completed',
+                            id: process.env['worker_id']
+                        });
+                    } else {
+                        // process next range in queue
+                        const next = this.internalPendingRanges.shift();
+                        this.newRange(next);
+                    }
                 }
             }, 200);
         }
@@ -286,7 +342,7 @@ export default class StateReader extends HyperionWorker {
                 try {
                     await this.onMessage(block);
                 } catch (e) {
-                    console.log(e);
+                    hLog(e);
                 }
             }
             this.ackBlockRange(block_array.length);
@@ -309,62 +365,88 @@ export default class StateReader extends HyperionWorker {
         }
 
         if (!process.env.worker_role) {
-            console.log("[FATAL ERROR] undefined role! Exiting now!");
-            this.ship.close();
+            hLog("[FATAL ERROR] undefined role! Exiting now!");
+            this.ship.close(false);
             process.exit(1);
             return;
         }
 
         // NORMAL OPERATION MODE
         if (!this.recovery) {
+
             const result = deserialize('result', data, this.txEnc, this.txDec, this.types);
+
+            // ship status message
             if (result[0] === 'get_status_result_v0') {
                 this.shipInitStatus = result[1];
                 hLog(`\n| SHIP Status Report\n| Init block: ${this.shipInitStatus['chain_state_begin_block']}\n| Head block: ${this.shipInitStatus['chain_state_end_block']}`);
                 const chain_state_begin_block = this.shipInitStatus['chain_state_begin_block'];
-                if (!this.conf.indexer.disable_reading) {
+                if (!this.conf.indexer.disable_reading || process.env['worker_role'] === 'repair_reader') {
+
                     switch (process.env['worker_role']) {
+
+                        // range reader setup
                         case 'reader': {
                             if (chain_state_begin_block > process.env.first_block) {
+
+                                // skip snapshot block until a solution to parse it is found
+                                const nextBlock = chain_state_begin_block + 2;
                                 hLog(`First saved block is ahead of requested range! - Req: ${process.env.first_block} | First: ${chain_state_begin_block}`);
-                                hLog('Requesting a single block');
-                                if (this.conf.settings.ignore_snapshot) {
-                                    this.local_block_num = chain_state_begin_block;
-                                    process.send({event: 'update_init_block', block_num: chain_state_begin_block + 2,});
-                                    this.newRange({
-                                        first_block: chain_state_begin_block + 1,
-                                        last_block: chain_state_begin_block + this.conf.scaling.batch_size
-                                    });
-                                } else {
-                                    process.send({event: 'update_init_block', block_num: chain_state_begin_block + 1});
-                                    this.newRange({
-                                        first_block: chain_state_begin_block,
-                                        last_block: chain_state_begin_block + 1
-                                    });
-                                }
+                                this.local_block_num = nextBlock - 1;
+                                process.send({
+                                    event: 'update_init_block',
+                                    block_num: nextBlock
+                                });
+                                this.newRange({
+                                    first_block: nextBlock,
+                                    last_block: nextBlock + this.conf.scaling.batch_size
+                                });
                             } else {
                                 this.requestBlocks(0);
                             }
                             break;
                         }
+
+                        // live reader setup
                         case 'continuous_reader': {
                             this.requestBlocks(parseInt(process.env['worker_last_processed_block'], 10));
                             break;
                         }
+
+                        case 'repair_reader': {
+                            this.repairMode = true;
+                            hLog('Waiting for operations...');
+                            process.send({
+                                event: 'repair_reader_ready'
+                            });
+                            break;
+                        }
+
                     }
                 } else {
-                    this.ship.close();
+                    this.ship.close(true);
                     process.exit(1);
                 }
+
             } else {
+
+                // ship block message
                 const res = result[1];
 
                 if (res['this_block']) {
+                    this.idle = false;
                     const blk_num = res['this_block']['block_num'];
+                    const blk_id = res['this_block']['block_id'];
+
                     const lib = res['last_irreversible'];
                     const task_payload = {num: blk_num, content: data};
 
                     if (res.block && res.traces && res.deltas) {
+
+                        if (this.repairMode) {
+                            hLog("Repaired block: " + blk_num);
+                        }
+
                         debugLog(`block_num: ${blk_num}, block_size: ${res.block.length}, traces_size: ${res.traces.length}, deltas_size: ${res.deltas.length}`);
                     } else {
                         if (!res.traces) {
@@ -381,17 +463,34 @@ export default class StateReader extends HyperionWorker {
                     if (this.isLiveReader) {
 
                         // LIVE READER MODE
-                        if (blk_num !== this.local_block_num + 1) {
-                            hLog(`Expected: ${this.local_block_num + 1}, received: ${blk_num}`);
+                        let prev_id;
+                        if (res['prev_block'] && res['prev_block']['block_id']) {
+                            prev_id = res['prev_block']['block_id'];
+                        }
+
+                        // // 2% chance to modify the previous block id to simulate a fork
+                        // if (Math.random() < 0.02) {
+                        //     // prev_id = prev_id + 'a';
+                        //     this.local_block_num = this.local_block_num - 1;
+                        // }
+
+                        if ((this.local_block_id && prev_id && this.local_block_id !== prev_id) || (blk_num !== this.local_block_num + 1)) {
+
+                            console.log((this.local_block_id && prev_id && this.local_block_id !== prev_id), (blk_num !== this.local_block_num + 1));
+                            console.log(blk_num, this.local_block_num + 1);
+
+                            hLog(`Unlinked block at ${prev_id} with previous block ${this.local_block_id}`);
+                            hLog(`Forked block: ${blk_num}`);
                             try {
                                 // delete all previously stored data for the forked blocks
                                 await this.handleFork(res);
                             } catch (e) {
                                 hLog(`Failed to handle fork during live reading! - Error: ${e.message}`);
                             }
-                        } else {
-                            this.local_block_num = blk_num;
                         }
+
+                        this.local_block_num = blk_num;
+                        this.local_block_id = blk_id;
 
                         if (lib.block_num > this.local_lib) {
                             this.local_lib = lib.block_num;
@@ -400,22 +499,32 @@ export default class StateReader extends HyperionWorker {
                         }
 
                         await this.stageOneDistQueue.push(task_payload);
+
                         return 1;
+
                     } else {
 
                         // Detect skipped first block
                         if (!this.receivedFirstBlock) {
                             if (blk_num !== this.local_block_num + 1) {
-                                hLog(`WARNING: First block received was #${blk_num}, but #${this.local_block_num + 1} was expected!`);
-                                hLog(`Make sure the block.log file contains the requested range, check with "vex-blocklog --smoke-test"`);
+                                // Special case for block 2 that is actually the first block on ship
+                                if (blk_num !== 2) {
+                                    hLog(`WARNING: First block received was #${blk_num}, but #${this.local_block_num + 1} was expected!`);
+                                    hLog(`Make sure the block.log file contains the requested range, check with "vex-blocklog --smoke-test"`);
+                                }
                                 this.local_block_num = blk_num - 1;
+                                this.local_distributed_count++;
+                                process.send({
+                                    event: 'skipped_block',
+                                    block_num: this.local_block_num + 1
+                                })
                             }
                             this.receivedFirstBlock = true;
                         }
 
                         // BACKLOG MODE
                         if (this.future_block !== 0 && this.future_block === blk_num) {
-                            console.log('Missing block ' + blk_num + ' received!');
+                            hLog('Missing block ' + blk_num + ' received!');
                         } else {
                             this.future_block = 0;
                         }
@@ -440,7 +549,18 @@ export default class StateReader extends HyperionWorker {
                         }
                     }
                 } else {
-                    return 0;
+                    if (this.repairMode) {
+                        hLog("No data on requested block!");
+                    }
+                    this.idle = true;
+                    // hLog(`Reader is idle! - Head at: ${result[1].head.block_num}`);
+                    // this.ship.close(true);
+                    // const queueSize = [this.stageOneDistQueue.length(), this.blockReadingQueue.length()];
+                    // hLog(queueSize);
+                    // process.send({
+                    //     event: 'kill_worker',
+                    //     id: process.env['worker_id']
+                    // });
                 }
             }
 
@@ -483,7 +603,7 @@ export default class StateReader extends HyperionWorker {
 
     private processFirstABI(data: Buffer) {
         const abiString = data.toString();
-        AbiEOS.load_abi("0", abiString);
+        this.abieos.loadAbi("0", abiString);
         this.abi = JSON.parse(abiString);
         this.types = Serialize.getTypesFromAbi(Serialize.createInitialTypes(), this.abi);
         this.abi.tables.map(table => this.tables.set(table.name, table.type));
@@ -494,14 +614,26 @@ export default class StateReader extends HyperionWorker {
     }
 
     private requestBlocks(start: number) {
-        const first_block = start > 0 ? start : process.env.first_block;
+        let first_block: string | number = start > 0 ? start : process.env.first_block;
         const last_block = start > 0 ? 0xffffffff : process.env.last_block;
         const request = this.baseRequest;
-        request.start_block_num = parseInt(first_block > 0 ? first_block.toString() : '1', 10);
+        if (typeof first_block === 'string') {
+            request.start_block_num = parseInt(first_block, 10);
+        } else {
+            if (first_block > 0) {
+                request.start_block_num = first_block;
+            } else {
+                request.start_block_num = 1;
+            }
+        }
         request.end_block_num = parseInt(last_block.toString(), 10);
         const reqType = 'get_blocks_request_' + this.shipRev;
-        debugLog(`Reader ${process.env.worker_id} sending ${reqType} from: ${request.start_block_num} to: ${request.end_block_num}`);
-        this.send([reqType, request]);
+        if (this.ship.connected) {
+            debugLog(`Reader ${process.env.worker_id} sending ${reqType} from: ${request.start_block_num} to: ${request.end_block_num}`);
+            this.send([reqType, request]);
+        } else {
+            hLog('[Warning] Request failed - SHIP is not online!');
+        }
     }
 
     private send(req_data: (string | any)[]) {
@@ -514,8 +646,12 @@ export default class StateReader extends HyperionWorker {
         this.local_block_num = request.start_block_num - 1;
         request.end_block_num = parseInt(last, 10);
         const reqType = 'get_blocks_request_' + this.shipRev;
-        debugLog(`Reader ${process.env.worker_id} sending ${reqType} from: ${request.start_block_num} to: ${request.end_block_num}`);
-        this.send([reqType, request]);
+        if (this.ship.connected) {
+            debugLog(`Reader ${process.env.worker_id} sending ${reqType} from: ${request.start_block_num} to: ${request.end_block_num}`);
+            this.send([reqType, request]);
+        } else {
+            hLog('[Warning] Request failed - SHIP is not online!');
+        }
     }
 
     private async deleteForkedBlock(block_id: string) {
@@ -529,6 +665,7 @@ export default class StateReader extends HyperionWorker {
             refresh: true,
             body: searchBody
         });
+
         if (dbqResultDelta.body && dbqResultDelta.statusCode === 200) {
             hLog(`${dbqResultDelta.body.deleted} deltas removed from ${block_id}`);
         } else {
@@ -541,6 +678,7 @@ export default class StateReader extends HyperionWorker {
             refresh: true,
             body: searchBody
         });
+
         if (dbqResultAction.body && dbqResultAction.statusCode === 200) {
             hLog(`${dbqResultAction.body.deleted} traces removed from ${block_id}`);
         } else {
@@ -564,7 +702,11 @@ export default class StateReader extends HyperionWorker {
             if (blockData.body) {
                 const targetBlockId = blockData.body._source.block_id;
                 this.forkedBlocks.set(targetBlockId, Date.now());
-                this.deleteForkedBlock(targetBlockId).catch(console.log);
+                try {
+                    await this.deleteForkedBlock(targetBlockId);
+                } catch (e: any) {
+                    hLog(`Error deleting forked block ${targetBlockId}: ${e.message}`);
+                }
             }
         }
     }
@@ -588,41 +730,41 @@ export default class StateReader extends HyperionWorker {
         this.send(['get_blocks_ack_request_v0', {num_messages: size}]);
     }
 
-    private startQueueWatcher() {
-        setInterval(() => {
-            if (this.isLiveReader) {
-                this.manager.checkQueueSize(this.chain + ":live_blocks").then(value => {
-                    if (value > this.conf.scaling.block_queue_limit) {
-                        this.allowRequests = false;
-                    } else {
-                        this.allowRequests = true;
-                        if (this.pendingRequest) {
-                            this.processPending();
-                        }
-                    }
-                });
-            } else {
-                let checkArr = [];
-                for (let i = 0; i < this.conf.scaling.ds_queues; i++) {
-                    const q = this.chain + ":blocks:" + (i + 1);
-                    checkArr.push(this.manager.checkQueueSize(q));
-                }
-                Promise.all(checkArr).then(data => {
-                    if (data.some(el => el > this.conf.scaling.block_queue_limit)) {
-                        if (this.allowRequests) {
-                            hLog('ship reader paused!', data);
-                        }
-                        this.allowRequests = false;
-                    } else {
-                        this.allowRequests = true;
-                        if (this.pendingRequest) {
-                            this.processPending();
-                        }
-                    }
-                });
-            }
-        }, this.queueSizeCheckInterval);
-    }
+    // private startQueueWatcher() {
+    //     setInterval(() => {
+    //         if (this.isLiveReader) {
+    //             this.manager.checkQueueSize(this.chain + ":live_blocks").then(value => {
+    //                 if (value > this.conf.scaling.block_queue_limit) {
+    //                     this.allowRequests = false;
+    //                 } else {
+    //                     this.allowRequests = true;
+    //                     if (this.pendingRequest) {
+    //                         this.processPending();
+    //                     }
+    //                 }
+    //             });
+    //         } else {
+    //             let checkArr = [];
+    //             for (let i = 0; i < this.conf.scaling.ds_queues; i++) {
+    //                 const q = this.chain + ":blocks:" + (i + 1);
+    //                 checkArr.push(this.manager.checkQueueSize(q));
+    //             }
+    //             Promise.all(checkArr).then(data => {
+    //                 if (data.some(el => el > this.conf.scaling.block_queue_limit)) {
+    //                     if (this.allowRequests) {
+    //                         hLog('ship reader paused!', data);
+    //                     }
+    //                     this.allowRequests = false;
+    //                 } else {
+    //                     this.allowRequests = true;
+    //                     if (this.pendingRequest) {
+    //                         this.processPending();
+    //                     }
+    //                 }
+    //             });
+    //         }
+    //     }, this.queueSizeCheckInterval);
+    // }
 
     private processPending() {
         this.requestBlockRange(this.pendingRequest[0], this.pendingRequest[1]);
@@ -641,9 +783,10 @@ export default class StateReader extends HyperionWorker {
         );
     }
 
+
     private handleLostConnection() {
         this.recovery = true;
-        this.ship.close();
+        this.ship.close(false);
         hLog(`Retrying connection in 5 seconds... [attempt: ${this.reconnectCount + 1}]`);
         debugLog(`PENDING REQUESTS:', ${this.pendingRequest}`);
         debugLog(`LOCAL BLOCK:', ${this.local_block_num}`);
@@ -651,5 +794,12 @@ export default class StateReader extends HyperionWorker {
             this.reconnectCount++;
             this.startWS();
         }, 5000);
+    }
+
+    private emitCompletedSignal() {
+        process.send({
+            event: 'completed',
+            id: process.env['worker_id']
+        });
     }
 }

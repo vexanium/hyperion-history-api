@@ -20,6 +20,7 @@ export interface ScalingConfigs {
 }
 
 export interface MainSettings {
+    use_global_agent?: boolean;
     process_prefix?: string;
     ignore_snapshot?: boolean;
     ship_request_rev: string;
@@ -88,6 +89,9 @@ interface CachedRouteConfig {
 }
 
 interface ApiConfigs {
+    log_errors?: boolean;
+    stream_scroll_batch?: number;
+    stream_scroll_limit?: number;
     enabled?: boolean;
     pm2_scaling?: number;
     node_max_old_space_size?: number;
@@ -132,26 +136,20 @@ interface HyperionHubConfigs {
 
 export interface HyperionConfig {
     api: ApiConfigs;
-
     settings: MainSettings;
-
     hub: HyperionHubConfigs;
     scaling: ScalingConfigs;
-
     indexer: IndexerConfigs;
-
     blacklists: {
         actions: string[],
         deltas: string[]
     };
-
     whitelists: {
         max_depth: number;
         root_only: boolean,
         actions: string[],
         deltas: string[]
     };
-
     features: {
         streaming: {
             enable: boolean,
@@ -173,18 +171,14 @@ export interface HyperionConfig {
         resource_usage: boolean,
         resource_limits: boolean,
     };
-
     prefetch: {
         read: number,
         block: number,
         index: number
     };
-
     experimental: any;
-
     plugins: {
         [key: string]: any;
     };
-
     alerts: AlertManagerOptions;
 }

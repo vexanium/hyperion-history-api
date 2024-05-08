@@ -22,11 +22,17 @@ async function getActions(fastify: FastifyInstance, request: FastifyRequest) {
     };
 
     const {skip, limit} = getSkipLimit(query, maxActions);
+
     const sort_direction = getSortDir(query);
+
     applyAccountFilters(query, queryStruct);
+
     applyGenericFilters(query, queryStruct, fastify.allowedActionQueryParamSet);
+
     applyTimeFilter(query, queryStruct);
+
     applyCodeActionFilters(query, queryStruct);
+
     // allow precise counting of total hits
     const trackTotalHits = getTrackTotalHits(query);
 
@@ -46,12 +52,15 @@ async function getActions(fastify: FastifyInstance, request: FastifyRequest) {
         indexPattern = fastify.manager.chain + '-action';
     }
 
-    const esResults = await fastify.elastic.search({
+    const esOpts = {
         "index": indexPattern,
         "from": skip || 0,
         "size": (limit > maxActions ? maxActions : limit) || 10,
         "body": query_body
-    });
+    };
+
+    // console.log(JSON.stringify(esOpts, null, 2));
+    const esResults = await fastify.elastic.search(esOpts);
 
     const results = esResults['body']['hits'];
     const response: any = {
@@ -101,13 +110,14 @@ async function getActions(fastify: FastifyInstance, request: FastifyRequest) {
             }
 
             if (query.simple) {
+                let notified = new Set(action.receipts.map(r => r.receiver));
                 response.simple_actions.push({
                     block: action['block_num'],
                     irreversible: response.lib !== 0 ? action['block_num'] < response.lib : undefined,
                     timestamp: action['@timestamp'],
                     transaction_id: action['trx_id'],
                     actors: action['act']['authorization'].map(a => `${a.actor}@${a.permission}`).join(","),
-                    notified: action['notified'].join(','),
+                    notified: [...notified].join(','),
                     contract: action['act']['account'],
                     action: action['act']['name'],
                     data: action['act']['data']

@@ -3,6 +3,7 @@ import {Api} from "vexaniumjs/dist";
 import fp from "fastify-plugin";
 
 export default fp(async (fastify: FastifyInstance, options: FastifyPluginOptions): Promise<void> => {
+
 	const rpc = fastify.manager.nodeosJsonRPC;
 	const chain_data = await rpc.get_info();
 	const api = new Api({
@@ -14,6 +15,6 @@ export default fp(async (fastify: FastifyInstance, options: FastifyPluginOptions
 	});
 	fastify.decorate('vexaniumjs', {api, rpc});
 }, {
-	fastify: '>=2.0.0',
-	name: 'fastify-eosjs'
+    fastify: '>=2.0.0',
+    name: 'fastify-eosjs'
 });

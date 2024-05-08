@@ -2,48 +2,18 @@ import {HyperionWorker} from "./hyperionWorker";
 import {Api} from "vexaniumjs/dist";
 import {ApiResponse} from "@elastic/elasticsearch";
 import {cargo, queue} from 'async';
-import * as AbiEOS from "@eosrio/node-abieos";
 import {Serialize} from "../addons/eosjs-native";
-import {Type} from "../addons/eosjs-native/eosjs-serialize";
+import {Action, Type} from "../addons/eosjs-native/eosjs-serialize";
 import {debugLog, hLog} from "../helpers/common_functions";
 import {createHash} from "crypto";
+import {Message, Options} from "amqplib";
+
 import flatstr from 'flatstr';
 
-const FJS = require('fast-json-stringify');
+import {index_queues} from "../definitions/index-queues";
+import {AbiDefinitions} from "../definitions/abi_def";
+import {Abi} from "../addons/eosjs-native/eosjs-rpc-interfaces";
 
-const lightBlockSerializer = FJS({
-    title: 'Light Block',
-    type: 'object',
-    properties: {
-        '@timestamp': {type: 'string'},
-        block_num: {type: 'integer'},
-        block_id: {type: 'string'},
-        prev_id: {type: 'string'},
-        producer: {type: 'string'},
-        new_producers: {
-            type: 'object',
-            nullable: true,
-            properties: {
-                version: {type: 'integer'},
-                producers: {
-                    type: 'array',
-                    items: {
-                        properties: {
-                            block_signing_key: {type: 'string'},
-                            producer_name: {type: 'string'}
-                        }
-                    }
-                }
-            }
-        },
-        schedule_version: {type: 'integer'},
-        cpu_usage: {type: 'integer'},
-        net_usage: {type: 'integer'}
-    }
-});
-
-const index_queues = require('../definitions/index-queues').index_queues;
-const {AbiDefinitions} = require("../definitions/abi_def");
 const abi_remapping = {
     "_Bool": "bool"
 };
@@ -124,13 +94,16 @@ export default class MainDSWorker extends HyperionWorker {
 
     allowedDynamicContracts: Set<string> = new Set<string>();
 
+    backpressureQueue: any[] = [];
+    waitToSend = false;
+
     constructor() {
 
         super();
 
         this.deltaRemovalQueue = this.chain + ":delta_rm";
 
-        this.consumerQueue = cargo((payload, cb) => {
+        this.consumerQueue = cargo<Message>((payload, cb) => {
             this.processMessages(payload).then(() => {
                 cb();
             }).catch((err) => {
@@ -182,7 +155,7 @@ export default class MainDSWorker extends HyperionWorker {
         switch (msg.event) {
             case 'initialize_abi': {
                 this.abi = JSON.parse(msg.data);
-                AbiEOS.load_abi("0", msg.data);
+                this.abieos.loadAbi("0", msg.data);
                 const initialTypes = Serialize.createInitialTypes();
                 this.types = Serialize.getTypesFromAbi(initialTypes, this.abi);
                 this.abi.tables.map(table => this.tables.set(table.name, table.type));
@@ -192,7 +165,7 @@ export default class MainDSWorker extends HyperionWorker {
             case 'update_abi': {
                 if (msg.abi) {
                     if (msg.abi.abi_hex) {
-                        AbiEOS.load_abi_hex(msg.abi.account, msg.abi.abi_hex);
+                        this.abieos.loadAbiHex(msg.abi.account, msg.abi.abi_hex);
                         hLog(`Worker ${process.env.worker_id} updated the abi for ${msg.abi.account}`);
                     }
                 }
@@ -224,16 +197,14 @@ export default class MainDSWorker extends HyperionWorker {
             });
         }
 
-        this.ch.assertQueue(this.deltaRemovalQueue, {durable: true});
+        this.ch.assertQueue(this.deltaRemovalQueue, {durable: false, arguments: {"x-queue-version": 2}});
 
         // make sure the input queue is ready if the deserializer launches too early
-        this.ch.assertQueue(process.env['worker_queue']);
+        this.ch.assertQueue(process.env['worker_queue'], {durable: false, arguments: {"x-queue-version": 2}});
 
         if (process.env['live_mode'] === 'false') {
             for (let i = 0; i < this.conf.scaling.ds_queues; i++) {
-                this.ch.assertQueue(this.chain + ":blocks:" + (i + 1), {
-                    durable: true
-                });
+                this.ch.assertQueue(this.chain + ":blocks:" + (i + 1), {durable: false, arguments: {"x-queue-version": 2}});
             }
         }
 
@@ -250,7 +221,7 @@ export default class MainDSWorker extends HyperionWorker {
                 n = 1;
             }
             for (let i = 0; i < n; i++) {
-                this.ch.assertQueue(q.name + ":" + (qIdx + 1), {durable: true});
+                this.ch.assertQueue(q.name + ":" + (qIdx + 1), {durable: false, arguments: {"x-queue-version": 2}});
                 qIdx++;
             }
         });
@@ -280,7 +251,7 @@ export default class MainDSWorker extends HyperionWorker {
         }
     }
 
-    async processMessages(messages) {
+    async processMessages(messages: Message[]) {
         await this.mLoader.parser.parseMessage(this, messages);
     }
 
@@ -289,6 +260,16 @@ export default class MainDSWorker extends HyperionWorker {
             this.ch.prefetch(this.conf.prefetch.block);
             this.ch.consume(process.env['worker_queue'], (data) => {
                 this.consumerQueue.push(data).catch(console.log);
+            });
+            this.ch.on('drain', () => {
+                this.waitToSend = false;
+                while (this.backpressureQueue.length > 0) {
+                    const msg = this.backpressureQueue.shift();
+                    const status = this.controlledSendToQueue(msg.queue, msg.payload, msg.options);
+                    if (!status) {
+                        break;
+                    }
+                }
             });
         }
     }
@@ -410,6 +391,16 @@ export default class MainDSWorker extends HyperionWorker {
                         live: process.env.live_mode
                     });
                 }
+
+                // stream light block
+                if (this.allowStreaming) {
+                    this.ch.publish('', this.chain + ':stream', Buffer.from(JSON.stringify(light_block)), {
+                        headers: {
+                            event: 'block',
+                            blockNum: light_block.block_num
+                        }
+                    });
+                }
             }
 
             // Process Delta Traces (must be done first to catch ABI updates)
@@ -468,6 +459,7 @@ export default class MainDSWorker extends HyperionWorker {
                                 hLog(`${block_num} was filtered with ${inline_count} actions!`);
                             }
                             try {
+                                trace[1].signatures = signatures;
                                 this.routeToPool(trace[1], {
                                     block_num,
                                     block_id,
@@ -475,8 +467,7 @@ export default class MainDSWorker extends HyperionWorker {
                                     ts,
                                     inline_count,
                                     filtered,
-                                    live: process.env['live_mode'],
-                                    signatures
+                                    live: process.env['live_mode']
                                 });
                             } catch (e) {
                                 hLog(e);
@@ -495,6 +486,7 @@ export default class MainDSWorker extends HyperionWorker {
             return {
                 block_num: res['this_block']['block_num'],
                 block_id: res['this_block']['block_id'],
+                block_ts,
                 trx_ids: onBlockTransactions,
                 size: _traces.length
             };
@@ -611,13 +603,31 @@ export default class MainDSWorker extends HyperionWorker {
         }
 
         const pool_queue = `${this.chain}:ds_pool:${selected_q}`;
-        if (this.ch_ready) {
-            // console.log('selected_q', pool_queue);
-            this.ch.sendToQueue(pool_queue, bufferFromJson(trace, true), {headers});
-            return true;
+        const payload = bufferFromJson(trace, true);
+
+        if (!this.waitToSend) {
+            if (this.ch_ready) {
+                this.controlledSendToQueue(pool_queue, payload, {headers});
+                return true;
+            } else {
+                return false;
+            }
         } else {
+            this.backpressureQueue.push({
+                queue: pool_queue,
+                payload: payload,
+                options: {headers}
+            });
             return false;
         }
+    }
+
+    controlledSendToQueue(pool_queue: string, payload: Buffer, options: Options.Publish): boolean {
+        const enqueueResult = this.ch.sendToQueue(pool_queue, payload, options);
+        if (!enqueueResult) {
+            this.waitToSend = true;
+        }
+        return enqueueResult;
     }
 
     createSerialBuffer(inputArray) {
@@ -695,10 +705,22 @@ export default class MainDSWorker extends HyperionWorker {
         }
     }
 
-    async verifyLocalType(contract, type, block_num, field) {
-        let abiStatus, resultType;
+    getAbiDataType(field: string, contract: string, type: string): string {
+        switch (field) {
+            case "action": {
+                return this.abieos.getTypeForAction(contract, type);
+            }
+            case "table": {
+                return this.abieos.getTypeForTable(contract, type);
+            }
+        }
+    }
+
+    async verifyLocalType(contract: string, type: string, block_num, field: string) {
+        let abiStatus: boolean;
+        let resultType: string;
         try {
-            resultType = AbiEOS['get_type_for_' + field](contract, type);
+            resultType = this.getAbiDataType(field, contract, type);
             abiStatus = true;
         } catch {
             abiStatus = false;
@@ -721,7 +743,7 @@ export default class MainDSWorker extends HyperionWorker {
                     }
                     if (abiStatus) {
                         try {
-                            resultType = AbiEOS['get_type_for_' + field](contract, type);
+                            resultType = this.getAbiDataType(field, contract, type);
                             abiStatus = true;
                             return [abiStatus, resultType];
                         } catch {
@@ -733,7 +755,7 @@ export default class MainDSWorker extends HyperionWorker {
             abiStatus = await this.loadCurrentAbiHex(contract);
             if (abiStatus === true) {
                 try {
-                    resultType = AbiEOS['get_type_for_' + field](contract, type);
+                    resultType = this.getAbiDataType(field, contract, type);
                     abiStatus = true;
                 } catch (e) {
                     debugLog(`(abieos/current) >> ${e.message}`);
@@ -774,9 +796,9 @@ export default class MainDSWorker extends HyperionWorker {
             let result;
             try {
                 if (typeof row.value === 'string') {
-                    result = AbiEOS.hex_to_json(row['code'], tableType, row.value);
+                    result = this.abieos.hexToJson(row['code'], tableType, row.value);
                 } else {
-                    result = AbiEOS.bin_to_json(row['code'], tableType, row.value);
+                    result = this.abieos.binToJson(row['code'], tableType, row.value);
                 }
                 row['data'] = result;
                 delete row.value;
@@ -849,7 +871,7 @@ export default class MainDSWorker extends HyperionWorker {
         if (check_action) {
             if (actions.has(check_action)) {
                 try {
-                    AbiEOS['load_abi'](accountName, JSON.stringify(abi));
+                    this.abieos.loadAbi(accountName, JSON.stringify(abi));
                 } catch (e) {
                     hLog(e);
                 }
@@ -1149,6 +1171,7 @@ export default class MainDSWorker extends HyperionWorker {
                 let jsonRow = await this.processContractRowNative(payload, block_num);
 
                 if (jsonRow?.value && !jsonRow['_blacklisted']) {
+                    debugLog(jsonRow);
                     debugLog('Delta DS failed ->>', jsonRow);
                     jsonRow = await this.processContractRowNative(payload, block_num - 1);
                     debugLog('Retry with previous ABI ->>', jsonRow);
@@ -1194,7 +1217,7 @@ export default class MainDSWorker extends HyperionWorker {
                     const abiHex = account['abi'];
                     const abiBin = new Uint8Array(Buffer.from(abiHex, 'hex'));
                     const initialTypes = Serialize.createInitialTypes();
-                    const abiDefTypes: Type = Serialize.getTypesFromAbi(initialTypes, AbiDefinitions).get('abi_def');
+                    const abiDefTypes: Type = Serialize.getTypesFromAbi(initialTypes, <Abi>AbiDefinitions).get('abi_def');
                     const abiObj = abiDefTypes.deserialize(this.createSerialBuffer(abiBin));
                     const jsonABIString = JSON.stringify(abiObj);
                     const abi_actions = abiObj.actions.map(a => a.name);
@@ -1217,7 +1240,7 @@ export default class MainDSWorker extends HyperionWorker {
                     // update locally cached abi
                     if (process.env['live_mode'] === 'true') {
                         hLog('Abi changed during live mode, updating local version...');
-                        const abi_update_status = AbiEOS['load_abi_hex'](account['name'], abiHex);
+                        const abi_update_status = this.abieos.loadAbiHex(account['name'], abiHex);
                         if (!abi_update_status) {
                             hLog(`Reload status: ${abi_update_status}`);
                         }
@@ -1389,9 +1412,33 @@ export default class MainDSWorker extends HyperionWorker {
         },
 
         // Global Chain configuration update
-        // "global_property": async (global_property, block_num, block_ts, row, block_id) => {
-        //     hLog(block_num, global_property);
-        // },
+        "global_property": async (global_property, block_num, block_ts) => {
+            if (global_property.proposed_schedule.version !== 0) {
+                hLog("Proposed Schedule version: " + global_property.proposed_schedule.version + " at block: " + global_property.proposed_schedule_block_num);
+                try {
+                    const payload = {
+                        block_num: global_property.proposed_schedule_block_num,
+                        '@timestamp': block_ts,
+                        version: global_property.proposed_schedule.version,
+                        producers: global_property.proposed_schedule.producers
+                    };
+                    payload.producers.forEach((producer: any) => {
+                        producer.name = producer.producer_name;
+                        delete producer.producer_name;
+                        if (producer.authority[0] === 'block_signing_authority_v0') {
+                            producer.authority = producer.authority[1];
+                            producer.keys = producer.authority.keys.map((key: any) => {
+                                return key.key;
+                            });
+                            delete producer.authority;
+                        }
+                    });
+                    await this.pushToIndexQueue(payload, 'schedule');
+                } catch (e) {
+                    hLog("Failed to parse proposed schedule: " + e.message);
+                }
+            }
+        },
 
         // Activated Protocol features
         // "protocol_state": async (protocol_state, block_num, block_ts, row, block_id) => {
@@ -1458,6 +1505,8 @@ export default class MainDSWorker extends HyperionWorker {
                                 await this.deltaStructHandlers[key](data[1], block_num, block_ts, row, block_id);
                             } catch (e) {
                                 hLog(`Delta struct [${key}] processing error: ${e.message}`);
+                                hLog(e);
+                                hLog(data[1]);
                             }
                         }
                     }
@@ -1469,7 +1518,11 @@ export default class MainDSWorker extends HyperionWorker {
     deserializeNative(datatype: string, array: any): any {
         if (this.abi) {
             try {
-                return AbiEOS[typeof array === 'string' ? "hex_to_json" : "bin_to_json"]("0", datatype, array);
+                if (typeof array === 'string') {
+                    return this.abieos.hexToJson("0", datatype, array);
+                } else {
+                    return this.abieos.binToJson("0", datatype, array);
+                }
             } catch (e) {
                 hLog('deserializeNative >>', datatype, '>>', e.message);
             }
@@ -1477,11 +1530,11 @@ export default class MainDSWorker extends HyperionWorker {
         }
     }
 
-    async deserializeActionAtBlockNative(_action, block_num): Promise<any> {
-        const [_status, actionType] = await this.verifyLocalType(_action.account, _action.name, block_num, "action");
-        if (_status) {
+    async deserializeActionAtBlockNative(action: Action, block_num: number): Promise<any> {
+        const [status, actionType] = await this.verifyLocalType(action.account, action.name, block_num, "action");
+        if (status) {
             try {
-                return AbiEOS.bin_to_json(_action.account, actionType, Buffer.from(_action.data, 'hex'));
+                return this.abieos.binToJson(action.account, actionType, Buffer.from(action.data, 'hex'));
             } catch (e) {
                 debugLog(`deserializeActionAtBlockNative: ${e.message}`);
             }
@@ -1602,41 +1655,46 @@ export default class MainDSWorker extends HyperionWorker {
 
         this.tableHandlers[EOSIO_ALIAS + ':producers'] = (delta) => {
             const data = delta['data'];
-            delta['@producers'] = {
-                total_votes: parseFloat(data['total_votes']),
-                is_active: data['is_active'],
-                unpaid_blocks: data['unpaid_blocks']
-            };
-            delete delta['data'];
+            if (data) {
+                delta['@producers'] = {
+                    total_votes: parseFloat(data['total_votes']),
+                    is_active: data['is_active'],
+                    unpaid_blocks: data['unpaid_blocks']
+                };
+                delete delta['data'];
+            }
         };
 
         this.tableHandlers[EOSIO_ALIAS + ':userres'] = (delta) => {
             const data = delta['data'];
-            const net = parseFloat(data['net_weight'].split(" ")[0]);
-            const cpu = parseFloat(data['cpu_weight'].split(" ")[0]);
-            delta['@userres'] = {
-                owner: data['owner'],
-                net_weight: net,
-                cpu_weight: cpu,
-                total_weight: parseFloat((net + cpu).toFixed(4)),
-                ram_bytes: parseInt(data['ram_bytes'])
-            };
-            delete delta['data'];
+            if (data['net_weight'] && data['cpu_weight']) {
+                const net = parseFloat(data['net_weight'].split(" ")[0]);
+                const cpu = parseFloat(data['cpu_weight'].split(" ")[0]);
+                delta['@userres'] = {
+                    owner: data['owner'],
+                    net_weight: net,
+                    cpu_weight: cpu,
+                    total_weight: parseFloat((net + cpu).toFixed(4)),
+                    ram_bytes: parseInt(data['ram_bytes'])
+                };
+                delete delta['data'];
+            }
         };
 
         this.tableHandlers[EOSIO_ALIAS + ':delband'] = (delta) => {
             const data = delta['data'];
-            const net = parseFloat(data['net_weight'].split(" ")[0]);
-            const cpu = parseFloat(data['cpu_weight'].split(" ")[0]);
-            delta['@delband'] = {
-                from: data['from'],
-                to: data['to'],
-                net_weight: net,
-                cpu_weight: cpu,
-                total_weight: parseFloat((net + cpu).toFixed(4))
-            };
-            delete delta['data'];
-            // hLog(delta);
+            if (data['net_weight'] && data['cpu_weight']) {
+                const net = parseFloat(data['net_weight'].split(" ")[0]);
+                const cpu = parseFloat(data['cpu_weight'].split(" ")[0]);
+                delta['@delband'] = {
+                    from: data['from'],
+                    to: data['to'],
+                    net_weight: net,
+                    cpu_weight: cpu,
+                    total_weight: parseFloat((net + cpu).toFixed(4))
+                };
+                delete delta['data'];
+            }
         };
 
         this.tableHandlers['vex.msig:proposal'] = async (delta) => {

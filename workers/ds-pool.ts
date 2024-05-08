@@ -4,7 +4,6 @@ import * as AbiEOS from "@eosrio/node-abieos";
 import {Serialize} from "../addons/eosjs-native";
 import {debugLog, hLog} from "../helpers/common_functions";
 import {Message} from "amqplib";
-import {parseDSPEvent} from "../modules/custom/dsp-parser";
 import {join, resolve} from "path";
 import {existsSync, readdirSync, readFileSync} from "fs";
 import flatstr from 'flatstr';
@@ -19,6 +18,48 @@ interface CustomAbiDef {
     abi: string;
     startingBlock: number;
     endingBlock: number;
+}
+
+function cleanActionTrace(t: any) {
+    try {
+        if (t.return_value === '') {
+            delete t.return_value;
+        }
+        if (t.context_free === false) {
+            delete t.context_free;
+        }
+        if (t.elapsed === '0') {
+            delete t.elapsed;
+        }
+
+        // remove act_digest from grouped receipts since it was written to the action
+        if (t.receipts && t.receipts.length > 0) {
+            t.act_digest = t.receipts[0].act_digest;
+            for (let receipt of t.receipts) {
+                delete receipt.act_digest;
+            }
+        } else {
+            delete t.receipts;
+        }
+
+        delete t.console;
+        delete t.receiver;
+
+        // onblock action case
+        if (t.signatures && t.signatures.length === 0) {
+            delete t.signatures;
+        }
+
+        if (t.inline_count === 0) {
+            delete t.inline_count;
+        }
+
+        if (t.net_usage_words === 0) {
+            delete t.net_usage_words;
+        }
+    } catch (e) {
+        console.log(e);
+    }
 }
 
 export default class DSPoolWorker extends HyperionWorker {
@@ -206,7 +247,7 @@ export default class DSPoolWorker extends HyperionWorker {
                         return entry.startingBlock < block_num && entry.endingBlock > block_num;
                     });
                     if (matchingAbi.abi) {
-                        _status = AbiEOS.load_abi(contract, matchingAbi.abi);
+                        _status = this.abieos.loadAbi(contract, matchingAbi.abi);
                     }
                 }
             }
@@ -251,17 +292,17 @@ export default class DSPoolWorker extends HyperionWorker {
         return [_status, resultType];
     }
 
-    async deserializeActionAtBlockNative(self, _action, block_num): Promise<any> {
-        self.recordContractUsage(_action.account);
-        const [_status, actionType] = await self.verifyLocalType(_action.account, _action.name, block_num, "action");
+    async deserializeActionAtBlockNative(self, action, block_num): Promise<any> {
+        self.recordContractUsage(action.account);
+        const [_status, actionType] = await self.verifyLocalType(action.account, action.name, block_num, "action");
         if (_status) {
             try {
-                return AbiEOS.bin_to_json(_action.account, actionType, Buffer.from(_action.data, 'hex'));
+                return this.abieos.binToJson(action.account, actionType, Buffer.from(action.data, 'hex'));
             } catch (e) {
-                debugLog(`(abieos) ${_action.account}::${_action.name} @ ${block_num} >>> ${e.message}`);
+                debugLog(`(abieos) ${action.account}::${action.name} @ ${block_num} >>> ${e.message}`);
             }
         }
-        return self.deserializeActionAtBlock(_action, block_num);
+        return self.deserializeActionAtBlock(action, block_num);
     }
 
     async getAbiFromHeadBlock(code) {
@@ -350,7 +391,7 @@ export default class DSPoolWorker extends HyperionWorker {
             if (actions.has(check_action)) {
                 if (!this.failedAbiMap.has(accountName) || !this.failedAbiMap.get(accountName).has(-1)) {
                     try {
-                        AbiEOS.load_abi(accountName, JSON.stringify(abi));
+                        this.abieos.loadAbi(accountName, JSON.stringify(abi));
                     } catch (e) {
                         hLog(e);
                     }
@@ -412,8 +453,8 @@ export default class DSPoolWorker extends HyperionWorker {
     }
 
     async processTraces(transaction_trace, extra) {
-        const {cpu_usage_us, net_usage_words} = transaction_trace;
-        const {block_num, block_id, producer, ts, inline_count, filtered, live, signatures} = extra;
+        const {cpu_usage_us, net_usage_words, signatures} = transaction_trace;
+        const {block_num, block_id, producer, ts, inline_count, filtered, live} = extra;
 
         if (transaction_trace.status === 0) {
             let action_count = 0;
@@ -464,20 +505,12 @@ export default class DSPoolWorker extends HyperionWorker {
             }
 
             const _finalTraces = [];
+
             if (_processedTraces.length > 1) {
                 const act_digests = {};
 
                 // collect digests & receipts
                 for (const _trace of _processedTraces) {
-
-                    if (this.conf.settings.dsp_parser) {
-                        if (_trace.console !== '') {
-                            await parseDSPEvent(this, _trace);
-                        }
-                    } else {
-                        delete _trace.console;
-                    }
-
                     if (act_digests[_trace.receipt.act_digest]) {
                         act_digests[_trace.receipt.act_digest].push(_trace.receipt);
                     } else {
@@ -488,18 +521,17 @@ export default class DSPoolWorker extends HyperionWorker {
                 // Apply notified accounts to first trace instance
                 for (const _trace of _processedTraces) {
                     if (act_digests[_trace.receipt.act_digest]) {
-                        const notifiedSet = new Set();
+                        // const notifiedSet = new Set();
                         _trace['receipts'] = [];
                         for (const _receipt of act_digests[_trace.receipt.act_digest]) {
-                            notifiedSet.add(_receipt.receiver);
+                            // notifiedSet.add(_receipt.receiver);
                             _trace['code_sequence'] = _receipt['code_sequence'];
                             delete _receipt['code_sequence'];
                             _trace['abi_sequence'] = _receipt['abi_sequence'];
                             delete _receipt['abi_sequence'];
-                            delete _receipt['act_digest'];
                             _trace['receipts'].push(_receipt);
                         }
-                        _trace['notified'] = [...notifiedSet];
+                        // _trace['notified'] = [...notifiedSet];
                         delete act_digests[_trace.receipt.act_digest];
                         delete _trace['receipt'];
                         delete _trace['receiver'];
@@ -514,10 +546,12 @@ export default class DSPoolWorker extends HyperionWorker {
                 _trace['code_sequence'] = _trace['receipt'].code_sequence;
                 _trace['abi_sequence'] = _trace['receipt'].abi_sequence;
                 _trace['act_digest'] = _trace['receipt'].act_digest;
-                _trace['notified'] = [_trace['receipt'].receiver];
+
+                // notified array is not required since receipts.receiver can be indexed directly
+                // _trace['notified'] = [_trace['receipt'].receiver];
+
                 delete _trace['receipt']['code_sequence'];
                 delete _trace['receipt']['abi_sequence'];
-                delete _trace['receipt']['act_digest'];
                 _trace['receipts'] = [_trace['receipt']];
                 delete _trace['receipt'];
                 _finalTraces.push(_trace);
@@ -528,6 +562,7 @@ export default class DSPoolWorker extends HyperionWorker {
             const redisPayload = new Map<string, IORedis.ValueType>();
 
             for (const uniqueAction of _finalTraces) {
+                cleanActionTrace(uniqueAction);
                 const payload = Buffer.from(flatstr(JSON.stringify(uniqueAction)));
                 redisPayload.set(uniqueAction.global_sequence.toString(), payload);
                 this.actionDsCounter++;
@@ -566,20 +601,24 @@ export default class DSPoolWorker extends HyperionWorker {
 
     pushToActionStreamingQueue(payload, uniqueAction) {
         if (this.allowStreaming && this.conf.features['streaming'].traces) {
-            const notifArray = new Set();
-            uniqueAction.act.authorization.forEach(auth => {
-                notifArray.add(auth.actor);
-            });
-            uniqueAction.notified.forEach(acc => {
-                notifArray.add(acc);
-            });
-            const headers = {
-                event: 'trace',
-                account: uniqueAction['act']['account'],
-                name: uniqueAction['act']['name'],
-                notified: [...notifArray].join(",")
-            };
-            this.ch.publish('', this.chain + ':stream', payload, {headers});
+            try {
+                const notifArray = new Set();
+                uniqueAction.act.authorization.forEach(auth => {
+                    notifArray.add(auth.actor);
+                });
+                uniqueAction.receipts.forEach(rec => {
+                    notifArray.add(rec.receiver);
+                });
+                const headers = {
+                    event: 'trace',
+                    account: uniqueAction['act']['account'],
+                    name: uniqueAction['act']['name'],
+                    notified: [...notifArray].join(",")
+                };
+                this.ch.publish('', this.chain + ':stream', payload, {headers});
+            } catch (e) {
+                hLog(e);
+            }
         }
     }
 
@@ -597,7 +636,7 @@ export default class DSPoolWorker extends HyperionWorker {
 
     deleteCache(contract) {
         // delete cache contract on abieos context
-        const status = AbiEOS.delete_contract(contract);
+        const status = this.abieos.deleteContract(contract);
         if (!status) {
             debugLog('Contract not found on cache!');
         } else {
@@ -636,10 +675,10 @@ export default class DSPoolWorker extends HyperionWorker {
         }
     }
 
-    initializeShipAbi(data) {
+    initializeShipAbi(data: string) {
         debugLog(`state history abi ready on ds_worker ${process.env.local_id}`);
         this.abi = JSON.parse(data);
-        AbiEOS.load_abi("0", data);
+        this.abieos.loadAbi("0", data);
         const initialTypes = Serialize.createInitialTypes();
         this.types = Serialize.getTypesFromAbi(initialTypes, this.abi);
         this.abi.tables.map(table => this.tables.set(table.name, table.type));
@@ -652,15 +691,11 @@ export default class DSPoolWorker extends HyperionWorker {
         this.local_queue = queue_prefix + ':ds_pool:' + process.env.local_id;
         if (this.ch) {
             this.ch_ready = true;
-            this.ch.assertQueue(this.local_queue, {
-                durable: true
-            });
+            this.ch.assertQueue(this.local_queue, {durable: false, arguments: {"x-queue-version": 2}});
             this.initConsumer();
         }
         if (this.conf.settings.dsp_parser) {
-            this.ch.assertQueue(`${queue_prefix}:dsp`, {
-                durable: true
-            });
+            this.ch.assertQueue(`${queue_prefix}:dsp`, {durable: false, arguments: {"x-queue-version": 2}});
         }
     }
 

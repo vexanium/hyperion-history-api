@@ -5,7 +5,7 @@ const path = require('path');
 const apps = [];
 const chainsRoot = path.join(path.resolve(), 'chains');
 readdirSync(chainsRoot)
-    .filter(f => f.endsWith('.config.json'))
+    .filter(f => f.endsWith('.config.json') && !f.startsWith('example'))
     .forEach(value => {
         const configFile = readFileSync(path.join(chainsRoot, value))
         const config = JSON.parse(configFile.toString());
@@ -19,5 +19,12 @@ readdirSync(chainsRoot)
             apps.push(addIndexer(chainName, indexerHeap));
         }
     });
+
+// apps.push({
+//     name: 'hyperion-governor',
+//     namespace: 'hyperion',
+//     script: 'governor/server/index.js',
+//     watch: false,
+// });
 
 module.exports = {apps};
