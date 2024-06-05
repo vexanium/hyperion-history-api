@@ -63,7 +63,8 @@ export class CacheManager {
     getCachedData(request: FastifyRequest): [string | null, string, string] {
         const urlParts = request.url.split("?");
         const pathComponents = urlParts[0].split('/');
-        const path = pathComponents.at(-1);
+        // const path = pathComponents.at(-1);
+        const path = pathComponents[pathComponents.length - 1];
         let payload = '';
         if (request.method === 'POST') {
             payload = JSON.stringify(request.body);
